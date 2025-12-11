@@ -609,15 +609,15 @@ def generate_measurement_table(
     logger.info(f"Saved measurement table: {output_path}")
 
     # Also print to console
-    print("\n" + "="*90)
+    print("\n" + "="*95)
     print("Measurement Table")
-    print("="*90)
-    print(f"{'No.':<6} {'Type':<14} {'길이(mm)':<12} {'폭(mm)':<10} {'너비(mm)':<10} {'면적(mm²)':<12}")
-    print("-"*90)
+    print("="*95)
+    print(f"{'No.':<6} {'Type':<14} {'Length(mm)':<13} {'Crack W(mm)':<14} {'Width(mm)':<12} {'Area(mm²)':<13}")
+    print("-"*95)
     for row in rows:
-        print(f"{row['No.']:<6} {row['Type']:<14} {row['Length (mm)']:<12} "
-              f"{row['Width-Crack (mm)']:<10} {row['Width-Defect (mm)']:<10} {row['Area (mm²)']:<12}")
-    print("="*90 + "\n")
+        print(f"{row['No.']:<6} {row['Type']:<14} {row['Length (mm)']:<13} "
+              f"{row['Width-Crack (mm)']:<14} {row['Width-Defect (mm)']:<12} {row['Area (mm²)']:<13}")
+    print("="*95 + "\n")
 
 
 def generate_combined_report(
@@ -695,7 +695,7 @@ def generate_combined_report(
     ax_table.axis('off')
 
     # Prepare table data with 6 columns
-    table_data = [['No.', 'Type', '길이\n(mm)', '폭\n(mm)', '너비\n(mm)', '면적\n(mm²)']]
+    table_data = [['No.', 'Type', 'Length\n(mm)', 'Crack W\n(mm)', 'Width\n(mm)', 'Area\n(mm²)']]
     for cluster_id in sorted(measurements.keys()):
         m = measurements[cluster_id]
         defect_class = m.get('class', 'crack')
@@ -703,16 +703,16 @@ def generate_combined_report(
 
         # Get measurements based on defect type
         if defect_class == 'crack':
-            # Crack: 길이 + 폭
+            # Crack: Length + Crack Width
             length = f"{m.get('total_length_mm', 0):.1f}"
-            width_crack = f"{m.get('avg_width_mm', 0):.2f}"  # 폭
-            width_defect = '-'  # 너비
+            width_crack = f"{m.get('avg_width_mm', 0):.2f}"
+            width_defect = '-'
             area = '-'
         else:
-            # 8종 결함: 길이 + 너비 + 면적
+            # 8 defect types: Length + Width + Area
             length = f"{m.get('length_mm', 0):.1f}"
-            width_crack = '-'  # 폭
-            width_defect = f"{m.get('width_mm', 0):.1f}"  # 너비
+            width_crack = '-'
+            width_defect = f"{m.get('width_mm', 0):.1f}"
             area = f"{m.get('area_mm2', 0):.1f}"
 
         table_data.append([
