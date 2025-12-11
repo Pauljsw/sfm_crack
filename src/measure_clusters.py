@@ -1355,6 +1355,220 @@ def measure_segment_2d(
 # Main Measurement Function
 # =============================================================================
 
+def compute_obb_3d(points_3d: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray]:
+    """
+    Compute Oriented Bounding Box in 3D using PCA.
+
+    Args:
+        points_3d: Nx3 array of 3D points
+
+    Returns:
+        (length, width, principal_axes, center)
+        - length: Length along longest axis (mm)
+        - width: Width along second axis (mm)
+        - principal_axes: 3x3 array of eigenvectors
+        - center: 3D centroid
+    """
+    center = np.mean(points_3d, axis=0)
+    centered = points_3d - center
+
+    # PCA
+    cov = np.cov(centered.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+
+    # Sort by eigenvalues (largest first)
+    idx = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
+
+    # Project points onto principal axes
+    projected = centered @ eigenvectors
+
+    # Compute bounding box dimensions
+    min_proj = np.min(projected, axis=0)
+    max_proj = np.max(projected, axis=0)
+    dimensions = max_proj - min_proj
+
+    # Length = longest axis, Width = second axis
+    length = dimensions[0] * 1000  # Convert to mm
+    width = dimensions[1] * 1000   # Convert to mm
+
+    return length, width, eigenvectors, center
+
+
+def compute_polygon_area_2d(points_2d: np.ndarray, scale_map: np.ndarray) -> float:
+    """
+    Compute polygon area using Shoelace formula with per-pixel scale.
+
+    Args:
+        points_2d: Nx2 array of 2D pixel coordinates
+        scale_map: HxW array of mm/pixel scale factors
+
+    Returns:
+        Area in mm²
+    """
+    if len(points_2d) < 3:
+        return 0.0
+
+    # Get convex hull to ensure proper polygon
+    from scipy.spatial import ConvexHull
+    try:
+        hull = ConvexHull(points_2d)
+        hull_points = points_2d[hull.vertices]
+    except:
+        hull_points = points_2d
+
+    # Sample scale factors at hull vertices
+    scales = []
+    for pt in hull_points:
+        x, y = int(pt[0]), int(pt[1])
+        h, w = scale_map.shape
+        x = np.clip(x, 0, w - 1)
+        y = np.clip(y, 0, h - 1)
+        scales.append(scale_map[y, x])
+
+    avg_scale = np.mean(scales)
+
+    # Shoelace formula for area in pixels
+    x = hull_points[:, 0]
+    y = hull_points[:, 1]
+    area_pixels = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+
+    # Convert to mm² using average scale
+    area_mm2 = area_pixels * (avg_scale ** 2)
+
+    return area_mm2
+
+
+def measure_obb_defect(
+    cluster: Dict,
+    crack_points_lookup: Dict[int, Dict],
+    masks_dir: Path,
+    scale_maps_dir: Path,
+    image_shape: Tuple[int, int]
+) -> Dict:
+    """
+    Measure non-crack defect using OBB (Oriented Bounding Box) + Area.
+
+    Args:
+        cluster: Cluster dict from crack_clusters.json
+        crack_points_lookup: point_id -> point dict
+        masks_dir: Path to YOLO masks
+        scale_maps_dir: Path to scale map .npy files
+        image_shape: (height, width)
+
+    Returns:
+        Measurement dict with width, length, area
+    """
+    cluster_id = cluster['cluster_id']
+    defect_class = cluster.get('class', 'unknown')
+    point_ids = cluster['point_ids']
+
+    # Get full point data (exclude synthetic points)
+    cluster_points = []
+    for pid in point_ids:
+        if pid in crack_points_lookup:
+            point = crack_points_lookup[pid]
+            if not point.get('is_synthetic', False):
+                cluster_points.append(point)
+
+    if not cluster_points:
+        logger.warning(f"Cluster {cluster_id} ({defect_class}): No points found")
+        return {
+            'cluster_id': cluster_id,
+            'class': defect_class,
+            'width_mm': 0,
+            'length_mm': 0,
+            'area_mm2': 0,
+            'method': 'obb',
+            'n_points': 0
+        }
+
+    # Extract 3D coordinates
+    points_3d = np.array([p['xyz'] for p in cluster_points])
+
+    # Compute OBB in 3D
+    length_3d, width_3d, _, _ = compute_obb_3d(points_3d)
+
+    # Also measure in 2D for area calculation
+    # Find best covering mask
+    source_masks = cluster.get('source_masks', [])
+    if not source_masks:
+        logger.warning(f"Cluster {cluster_id} ({defect_class}): No source masks")
+        return {
+            'cluster_id': cluster_id,
+            'class': defect_class,
+            'width_mm': width_3d,
+            'length_mm': length_3d,
+            'area_mm2': 0,
+            'method': 'obb_3d_only',
+            'n_points': len(cluster_points)
+        }
+
+    # Use the mask with most points
+    best_source = source_masks[0]
+    image_id = best_source['image_id']
+
+    # Load scale map
+    timestamp_key = image_id
+    for prefix in ['camera_RGB_', 'camera_DPT_']:
+        if image_id.startswith(prefix):
+            timestamp_key = image_id[len(prefix):]
+            break
+
+    scale_map = None
+    scale_map_patterns = [
+        f"scale_map_iso_camera_DPT_{timestamp_key}.npy",
+        f"scale_map_iso_{image_id}.npy",
+        f"scale_map_iso_{timestamp_key}.npy",
+    ]
+
+    for pattern in scale_map_patterns:
+        scale_map_path = scale_maps_dir / pattern
+        if scale_map_path.exists():
+            scale_map = np.load(scale_map_path)
+            break
+
+    if scale_map is None:
+        logger.warning(f"Cluster {cluster_id} ({defect_class}): Scale map not found for {image_id}")
+        return {
+            'cluster_id': cluster_id,
+            'class': defect_class,
+            'width_mm': width_3d,
+            'length_mm': length_3d,
+            'area_mm2': 0,
+            'method': 'obb_3d_only',
+            'n_points': len(cluster_points)
+        }
+
+    # Collect 2D pixel coordinates from cluster points
+    points_2d = []
+    for point in cluster_points:
+        sources = point.get('source_masks', point.get('sources', []))
+        for source in sources:
+            if source['image_id'] == image_id:
+                # Get pixel coordinates from source info
+                # Note: This assumes source has 'pixel_xy' or we need to project 3D to 2D
+                # For now, we'll use a simplified approach
+                pass
+
+    # If we can't get 2D points, estimate area from 3D
+    area_mm2 = length_3d * width_3d  # Rough estimate
+
+    logger.info(f"Cluster {cluster_id} ({defect_class}): "
+                f"L={length_3d:.1f}mm, W={width_3d:.1f}mm, A={area_mm2:.1f}mm²")
+
+    return {
+        'cluster_id': cluster_id,
+        'class': defect_class,
+        'width_mm': width_3d,
+        'length_mm': length_3d,
+        'area_mm2': area_mm2,
+        'method': 'obb',
+        'n_points': len(cluster_points)
+    }
+
+
 def measure_cluster(
     cluster: Dict,
     crack_points_lookup: Dict[int, Dict],
@@ -1372,6 +1586,7 @@ def measure_cluster(
 ) -> Dict:
     """
     Measure a single cluster.
+    Routes to appropriate measurement method based on defect class.
 
     Args:
         cluster: Cluster dict from crack_clusters.json
@@ -1386,6 +1601,17 @@ def measure_cluster(
     Returns:
         Measurement dict
     """
+    cluster_id = cluster['cluster_id']
+    defect_class = cluster.get('class', 'crack')
+
+    # Route based on defect class
+    if defect_class != 'crack':
+        # Use OBB + Area for non-crack defects
+        return measure_obb_defect(
+            cluster, crack_points_lookup, masks_dir, scale_maps_dir, image_shape
+        )
+
+    # Below is the original crack measurement logic
     cluster_id = cluster['cluster_id']
     point_ids = cluster['point_ids']
 

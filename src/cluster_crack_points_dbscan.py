@@ -606,145 +606,186 @@ def run_dbscan_clustering(
     with open(input_json, 'r') as f:
         data = json.load(f)
 
-    crack_points = data['points']
+    all_points = data['points']
     metadata = data['metadata']
 
-    logger.info(f"  Loaded {len(crack_points)} crack points")
+    logger.info(f"  Loaded {len(all_points)} defect points")
 
-    if len(crack_points) == 0:
-        logger.warning("No crack points to cluster!")
+    if len(all_points) == 0:
+        logger.warning("No defect points to cluster!")
         return
 
-    # Extract coordinates
-    xyz = np.array([p['xyz'] for p in crack_points])
+    # Group points by class
+    points_by_class = {}
+    for point in all_points:
+        cls = point.get('class', 'crack')  # Default to 'crack' for backward compatibility
+        if cls not in points_by_class:
+            points_by_class[cls] = []
+        points_by_class[cls].append(point)
 
-    # Run DBSCAN
-    logger.info(f"Running DBSCAN (eps={eps}, min_samples={min_samples})...")
-    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(xyz)
-    labels = clustering.labels_
+    logger.info(f"  Found {len(points_by_class)} defect classes:")
+    for cls, pts in sorted(points_by_class.items()):
+        logger.info(f"    {cls}: {len(pts)} points")
 
-    # Count clusters
-    unique_labels = set(labels)
-    n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
-    n_noise = list(labels).count(-1)
+    # Process each class separately
+    all_clusters = []
+    total_noise = 0
+    global_cluster_id = 0
 
-    logger.info(f"  Found {n_clusters} clusters")
-    logger.info(f"  Noise points: {n_noise} ({n_noise/len(crack_points)*100:.1f}%)")
+    for cls, crack_points in sorted(points_by_class.items()):
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Clustering class '{cls}' ({len(crack_points)} points)...")
+        logger.info(f"{'='*80}")
 
-    # Aggregate clusters
-    logger.info("Aggregating cluster information...")
-    clusters = []
+        # Extract coordinates
+        xyz = np.array([p['xyz'] for p in crack_points])
 
-    for cluster_id in sorted(unique_labels):
-        if cluster_id == -1:
-            continue  # Skip noise
+        # Run DBSCAN
+        logger.info(f"Running DBSCAN (eps={eps}, min_samples={min_samples})...")
+        clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(xyz)
+        labels = clustering.labels_
 
-        # Get points in this cluster
-        cluster_mask = labels == cluster_id
-        cluster_indices = np.where(cluster_mask)[0]
-        cluster_xyz = xyz[cluster_mask]
+        # Count clusters
+        unique_labels = set(labels)
+        n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+        n_noise = list(labels).count(-1)
+        total_noise += n_noise
 
-        # Get point data
-        cluster_points = [crack_points[i] for i in cluster_indices]
+        logger.info(f"  Found {n_clusters} clusters for class '{cls}'")
+        logger.info(f"  Noise points: {n_noise} ({n_noise/len(crack_points)*100:.1f}%)")
 
-        # Aggregate source masks (skip synthetic points)
-        source_masks_map = defaultdict(lambda: {
-            'n_points': 0,
-            'confidence_sum': 0.0
-        })
+        # Aggregate clusters
+        logger.info("Aggregating cluster information...")
+        clusters = []
 
-        for point in cluster_points:
-            # Skip synthetic points - they don't have source information
-            if point.get('is_synthetic', False):
-                continue
-            # Handle both 'sources' and 'source_masks' field names
-            sources = point.get('sources', point.get('source_masks', []))
-            for source in sources:
-                key = (source['image_id'], source['mask_id'])
-                source_masks_map[key]['n_points'] += 1
-                source_masks_map[key]['confidence_sum'] += source.get('confidence', 1.0)
+        for cluster_id in sorted(unique_labels):
+            if cluster_id == -1:
+                continue  # Skip noise
 
-        # Convert to list
-        source_masks = []
-        for (image_id, mask_id), info in source_masks_map.items():
-            source_masks.append({
-                'image_id': image_id,
-                'mask_id': mask_id,
-                'n_points': info['n_points'],
-                'avg_confidence': info['confidence_sum'] / info['n_points']
+            # Get points in this cluster
+            cluster_mask = labels == cluster_id
+            cluster_indices = np.where(cluster_mask)[0]
+            cluster_xyz = xyz[cluster_mask]
+
+            # Get point data
+            cluster_points = [crack_points[i] for i in cluster_indices]
+
+            # Aggregate source masks (skip synthetic points)
+            source_masks_map = defaultdict(lambda: {
+                'n_points': 0,
+                'confidence_sum': 0.0
             })
 
-        # Sort by n_points (most contributing masks first)
-        source_masks.sort(key=lambda x: x['n_points'], reverse=True)
+            for point in cluster_points:
+                # Skip synthetic points - they don't have source information
+                if point.get('is_synthetic', False):
+                    continue
+                # Handle both 'sources' and 'source_masks' field names
+                sources = point.get('sources', point.get('source_masks', []))
+                for source in sources:
+                    key = (source['image_id'], source['mask_id'])
+                    source_masks_map[key]['n_points'] += 1
+                    source_masks_map[key]['confidence_sum'] += source.get('confidence', 1.0)
 
-        # Compute cluster properties
-        centroid = np.mean(cluster_xyz, axis=0)
-        bbox_min = np.min(cluster_xyz, axis=0)
-        bbox_max = np.max(cluster_xyz, axis=0)
-        principal_axis = compute_principal_axis(cluster_xyz)
+            # Convert to list
+            source_masks = []
+            for (image_id, mask_id), info in source_masks_map.items():
+                source_masks.append({
+                    'image_id': image_id,
+                    'mask_id': mask_id,
+                    'n_points': info['n_points'],
+                    'avg_confidence': info['confidence_sum'] / info['n_points']
+                })
 
-        # Average confidence (only from original points with confidence info)
-        confidences = []
-        for p in cluster_points:
-            if not p.get('is_synthetic', False):
-                conf = p.get('avg_confidence', None)
-                if conf is None:
-                    # Try to get confidence from sources
-                    sources = p.get('sources', p.get('source_masks', []))
-                    if sources:
-                        conf = np.mean([s.get('confidence', 1.0) for s in sources])
-                if conf is not None:
-                    confidences.append(conf)
-        avg_confidence = np.mean(confidences) if confidences else 1.0
+            # Sort by n_points (most contributing masks first)
+            source_masks.sort(key=lambda x: x['n_points'], reverse=True)
 
-        # Create cluster entry
-        cluster_entry = {
-            'cluster_id': int(cluster_id),
-            'n_points': len(cluster_points),
-            'point_ids': [p['point_id'] for p in cluster_points],
-            'centroid_3d': centroid.tolist(),
-            'bbox_3d': {
-                'min': bbox_min.tolist(),
-                'max': bbox_max.tolist()
-            },
-            'principal_axis': principal_axis.tolist(),
-            'source_masks': source_masks,
-            'n_source_masks': len(source_masks),
-            'n_views': len(set(s['image_id'] for s in source_masks)),
-            'avg_confidence': float(avg_confidence)
-        }
+            # Compute cluster properties
+            centroid = np.mean(cluster_xyz, axis=0)
+            bbox_min = np.min(cluster_xyz, axis=0)
+            bbox_max = np.max(cluster_xyz, axis=0)
+            principal_axis = compute_principal_axis(cluster_xyz)
 
-        clusters.append(cluster_entry)
+            # Average confidence (only from original points with confidence info)
+            confidences = []
+            for p in cluster_points:
+                if not p.get('is_synthetic', False):
+                    conf = p.get('avg_confidence', None)
+                    if conf is None:
+                        # Try to get confidence from sources
+                        sources = p.get('sources', p.get('source_masks', []))
+                        if sources:
+                            conf = np.mean([s.get('confidence', 1.0) for s in sources])
+                    if conf is not None:
+                        confidences.append(conf)
+            avg_confidence = np.mean(confidences) if confidences else 1.0
 
-        logger.debug(f"  Cluster {cluster_id}: {len(cluster_points)} points, "
-                     f"{len(source_masks)} source masks, {cluster_entry['n_views']} views")
+            # Create cluster entry
+            cluster_entry = {
+                'cluster_id': int(cluster_id),
+                'class': cls,  # Add class information
+                'n_points': len(cluster_points),
+                'point_ids': [p['point_id'] for p in cluster_points],
+                'centroid_3d': centroid.tolist(),
+                'bbox_3d': {
+                    'min': bbox_min.tolist(),
+                    'max': bbox_max.tolist()
+                },
+                'principal_axis': principal_axis.tolist(),
+                'source_masks': source_masks,
+                'n_source_masks': len(source_masks),
+                'n_views': len(set(s['image_id'] for s in source_masks)),
+                'avg_confidence': float(avg_confidence)
+            }
 
-    # Stage 1.5: Direction-aware splitting
-    if not no_split and len(clusters) > 0:
-        logger.info(f"Stage 1.5: Direction-aware splitting (angle={split_angle}°)...")
-        clusters = split_clusters_by_direction(
-            clusters, crack_points, split_angle
-        )
-        n_clusters = len(clusters)
+            clusters.append(cluster_entry)
 
-    # Stage 2: Direction-aware merging
-    if not no_merge and len(clusters) > 1:
-        logger.info(f"Stage 2: Direction-aware merging (distance={merge_distance}m, angle={merge_angle}°)...")
-        clusters = merge_clusters_by_direction(
-            clusters, crack_points, merge_distance, merge_angle
-        )
-        n_clusters = len(clusters)
+            logger.debug(f"  Cluster {cluster_id}: {len(cluster_points)} points, "
+                         f"{len(source_masks)} source masks, {cluster_entry['n_views']} views")
 
-    # Sort clusters by X coordinate (left to right)
-    clusters.sort(key=lambda x: x['centroid_3d'][0])
+        # Stage 1.5: Direction-aware splitting (per class)
+        if not no_split and len(clusters) > 0:
+            logger.info(f"Stage 1.5: Direction-aware splitting for '{cls}' (angle={split_angle}°)...")
+            clusters = split_clusters_by_direction(
+                clusters, crack_points, split_angle
+            )
+            n_clusters = len(clusters)
+            logger.info(f"  After splitting: {n_clusters} clusters")
 
-    # Reassign cluster IDs after sorting
-    for i, cluster in enumerate(clusters):
+        # Stage 2: Direction-aware merging (per class)
+        if not no_merge and len(clusters) > 1:
+            logger.info(f"Stage 2: Direction-aware merging for '{cls}' (distance={merge_distance}m, angle={merge_angle}°)...")
+            clusters = merge_clusters_by_direction(
+                clusters, crack_points, merge_distance, merge_angle
+            )
+            n_clusters = len(clusters)
+            logger.info(f"  After merging: {n_clusters} clusters")
+
+        # Add class clusters to all_clusters with temporary local IDs
+        for cluster in clusters:
+            cluster['class'] = cls  # Ensure class is set
+            all_clusters.append(cluster)
+
+        logger.info(f"Class '{cls}' complete: {len(clusters)} clusters")
+
+    # Now all classes are processed, assign global cluster IDs
+    logger.info(f"\n{'='*80}")
+    logger.info(f"Assigning global cluster IDs across all classes...")
+    logger.info(f"{'='*80}")
+
+    # Sort all clusters by X coordinate (left to right)
+    all_clusters.sort(key=lambda x: x['centroid_3d'][0])
+
+    # Reassign cluster IDs globally
+    for i, cluster in enumerate(all_clusters):
         cluster['cluster_id'] = i
+
+    n_clusters = len(all_clusters)
+    n_noise = total_noise
 
     # DEBUG: Check for duplicate point_ids across clusters
     all_point_ids = []
-    for cluster in clusters:
+    for cluster in all_clusters:
         all_point_ids.extend(cluster['point_ids'])
 
     unique_point_ids = set(all_point_ids)
@@ -759,37 +800,51 @@ def run_dbscan_clustering(
         logger.warning(f"  Duplicate point_ids: {list(duplicates.keys())[:10]}...")
 
         # Find clusters with overlapping centroids
-        for i in range(len(clusters)):
-            for j in range(i + 1, len(clusters)):
+        for i in range(len(all_clusters)):
+            for j in range(i + 1, len(all_clusters)):
                 dist = np.linalg.norm(
-                    np.array(clusters[i]['centroid_3d']) - np.array(clusters[j]['centroid_3d'])
+                    np.array(all_clusters[i]['centroid_3d']) - np.array(all_clusters[j]['centroid_3d'])
                 )
                 if dist < 0.05:  # 5cm
-                    shared = set(clusters[i]['point_ids']) & set(clusters[j]['point_ids'])
+                    shared = set(all_clusters[i]['point_ids']) & set(all_clusters[j]['point_ids'])
                     logger.warning(f"  Clusters {i} and {j}: dist={dist:.3f}m, shared_points={len(shared)}")
 
     # Statistics
     logger.info("=" * 80)
-    logger.info("Clustering Statistics")
+    logger.info("Clustering Statistics (All Classes)")
     logger.info("=" * 80)
     logger.info(f"  Total clusters: {n_clusters}")
     logger.info(f"  Total noise points: {n_noise}")
 
-    if clusters:
-        points_per_cluster = [c['n_points'] for c in clusters]
+    # Statistics per class
+    if all_clusters:
+        class_stats = {}
+        for cluster in all_clusters:
+            cls = cluster.get('class', 'unknown')
+            if cls not in class_stats:
+                class_stats[cls] = {'count': 0, 'points': 0}
+            class_stats[cls]['count'] += 1
+            class_stats[cls]['points'] += cluster['n_points']
+
+        logger.info(f"  Clusters per class:")
+        for cls, stats in sorted(class_stats.items()):
+            logger.info(f"    {cls}: {stats['count']} clusters, {stats['points']} points")
+
+        points_per_cluster = [c['n_points'] for c in all_clusters]
         logger.info(f"  Points per cluster: min={min(points_per_cluster)}, "
                     f"max={max(points_per_cluster)}, mean={np.mean(points_per_cluster):.1f}")
 
-        views_per_cluster = [c['n_views'] for c in clusters]
+        views_per_cluster = [c['n_views'] for c in all_clusters]
         logger.info(f"  Views per cluster: min={min(views_per_cluster)}, "
                     f"max={max(views_per_cluster)}, mean={np.mean(views_per_cluster):.1f}")
 
     # Save output
     output_data = {
         'metadata': {
-            'total_crack_points': len(crack_points),
+            'total_defect_points': len(all_points),
             'n_clusters': n_clusters,
             'noise_points': n_noise,
+            'n_classes': len(points_by_class),
             'dbscan_eps': eps,
             'dbscan_min_samples': min_samples,
             'split_enabled': not no_split,
@@ -800,7 +855,7 @@ def run_dbscan_clustering(
             'sorted_by': 'x_coordinate',
             'input_metadata': metadata
         },
-        'clusters': clusters
+        'clusters': all_clusters
     }
 
     output_path = Path(output_json)
@@ -816,17 +871,17 @@ def run_dbscan_clustering(
         logger.info(f"\nGenerating PLY visualization...")
 
         # Build point_id to xyz lookup
-        point_lookup = {p['point_id']: np.array(p['xyz']) for p in crack_points}
+        point_lookup = {p['point_id']: np.array(p['xyz']) for p in all_points}
 
         # Generate colors
-        colors = generate_cluster_colors(len(clusters))
+        colors = generate_cluster_colors(len(all_clusters))
 
         # Collect all points with colors
         all_xyz = []
         all_rgb = []
         clustered_point_ids = set()
 
-        for cluster_idx, cluster in enumerate(clusters):
+        for cluster_idx, cluster in enumerate(all_clusters):
             point_ids = cluster['point_ids']
             color = colors[cluster_idx % len(colors)] if colors else (255, 0, 0)
 
@@ -840,7 +895,7 @@ def run_dbscan_clustering(
         if show_noise:
             noise_color = (128, 128, 128)
             noise_count = 0
-            for point in crack_points:
+            for point in all_points:
                 if point['point_id'] not in clustered_point_ids:
                     all_xyz.append(np.array(point['xyz']))
                     all_rgb.append(noise_color)
@@ -856,7 +911,7 @@ def run_dbscan_clustering(
 
     logger.info("=" * 80)
 
-    return clusters
+    return all_clusters
 
 
 if __name__ == '__main__':

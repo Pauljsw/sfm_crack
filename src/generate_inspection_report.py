@@ -563,36 +563,52 @@ def generate_measurement_table(
     """
     Generate measurement table CSV.
 
-    Columns: No., Damage Type, Width (mm), Length (mm)
+    Columns: No., Type, Width (mm), Length (mm), Area (mm²)
     """
     rows = []
 
     for cluster_id in sorted(measurements.keys()):
         m = measurements[cluster_id]
+        defect_class = m.get('class', 'crack')
+
+        # Format defect type name
+        type_name = defect_class.replace('_', ' ').title()
+
+        # Get measurements based on defect type
+        if defect_class == 'crack':
+            width = round(m.get('avg_width_mm', 0), 2)
+            length = round(m.get('total_length_mm', 0), 1)
+            area = round(m.get('area_mm2', 0), 1) if 'area_mm2' in m else '-'
+        else:
+            width = round(m.get('width_mm', 0), 2)
+            length = round(m.get('length_mm', 0), 1)
+            area = round(m.get('area_mm2', 0), 1)
+
         rows.append({
-            'No.': f'Crack {cluster_id + 1}',
-            'Damage Type': 'Crack',
-            'Width (mm)': round(m.get('avg_width_mm', 0), 2),
-            'Length (mm)': round(m.get('total_length_mm', 0), 1),
+            'No.': cluster_id + 1,
+            'Type': type_name,
+            'Width (mm)': width,
+            'Length (mm)': length,
+            'Area (mm²)': area
         })
 
     # Write CSV
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.DictWriter(f, fieldnames=['No.', 'Damage Type', 'Width (mm)', 'Length (mm)'])
+        writer = csv.DictWriter(f, fieldnames=['No.', 'Type', 'Width (mm)', 'Length (mm)', 'Area (mm²)'])
         writer.writeheader()
         writer.writerows(rows)
 
     logger.info(f"Saved measurement table: {output_path}")
 
     # Also print to console
-    print("\n" + "="*60)
+    print("\n" + "="*70)
     print("Measurement Table")
-    print("="*60)
-    print(f"{'No.':<12} {'Type':<10} {'Width(mm)':<12} {'Length(mm)':<12}")
-    print("-"*60)
+    print("="*70)
+    print(f"{'No.':<6} {'Type':<16} {'Width(mm)':<12} {'Length(mm)':<14} {'Area(mm²)':<12}")
+    print("-"*70)
     for row in rows:
-        print(f"{row['No.']:<12} {row['Damage Type']:<10} {row['Width (mm)']:<12} {row['Length (mm)']:<12}")
-    print("="*60 + "\n")
+        print(f"{row['No.']:<6} {row['Type']:<16} {row['Width (mm)']:<12} {row['Length (mm)']:<14} {row['Area (mm²)']:<12}")
+    print("="*70 + "\n")
 
 
 def generate_combined_report(
@@ -661,7 +677,7 @@ def generate_combined_report(
                               fontsize=8, fontweight='bold', color=color)
 
     ax_diagram.set_aspect('equal')
-    ax_diagram.set_title('Crack Location Diagram', fontsize=12, fontweight='bold')
+    ax_diagram.set_title('Defect Location Diagram', fontsize=12, fontweight='bold')
     ax_diagram.set_xticklabels([])
     ax_diagram.set_yticklabels([])
 
@@ -670,14 +686,28 @@ def generate_combined_report(
     ax_table.axis('off')
 
     # Prepare table data
-    table_data = [['No.', 'Type', 'Width\n(mm)', 'Length\n(mm)']]
+    table_data = [['No.', 'Type', 'Width\n(mm)', 'Length\n(mm)', 'Area\n(mm²)']]
     for cluster_id in sorted(measurements.keys()):
         m = measurements[cluster_id]
+        defect_class = m.get('class', 'crack')
+        type_name = defect_class.replace('_', ' ').title()
+
+        # Get measurements based on defect type
+        if defect_class == 'crack':
+            width = f"{m.get('avg_width_mm', 0):.2f}"
+            length = f"{m.get('total_length_mm', 0):.1f}"
+            area = f"{m.get('area_mm2', 0):.1f}" if 'area_mm2' in m else '-'
+        else:
+            width = f"{m.get('width_mm', 0):.2f}"
+            length = f"{m.get('length_mm', 0):.1f}"
+            area = f"{m.get('area_mm2', 0):.1f}"
+
         table_data.append([
             f'{cluster_id + 1}',
-            'Crack',
-            f"{m.get('avg_width_mm', 0):.2f}",
-            f"{m.get('total_length_mm', 0):.1f}"
+            type_name,
+            width,
+            length,
+            area
         ])
 
     # Create table
@@ -685,7 +715,7 @@ def generate_combined_report(
         cellText=table_data,
         loc='center',
         cellLoc='center',
-        colWidths=[0.15, 0.2, 0.25, 0.25]
+        colWidths=[0.12, 0.22, 0.18, 0.18, 0.18]
     )
 
     # Style table
@@ -694,7 +724,7 @@ def generate_combined_report(
     table.scale(1.2, 1.5)
 
     # Header styling
-    for j in range(4):
+    for j in range(5):
         table[(0, j)].set_facecolor('#4472C4')
         table[(0, j)].set_text_props(color='white', fontweight='bold')
 
