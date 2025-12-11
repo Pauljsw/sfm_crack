@@ -563,7 +563,9 @@ def generate_measurement_table(
     """
     Generate measurement table CSV.
 
-    Columns: No., Type, Width (mm), Length (mm), Area (mm²)
+    Columns: No., Type, 길이(mm), 폭(mm), 너비(mm), 면적(mm²)
+    - Crack: 길이 + 폭 (선형 결함)
+    - Others: 길이 + 너비 + 면적 (면적 결함)
     """
     rows = []
 
@@ -576,39 +578,46 @@ def generate_measurement_table(
 
         # Get measurements based on defect type
         if defect_class == 'crack':
-            width = round(m.get('avg_width_mm', 0), 2)
+            # Crack: 길이 + 폭
             length = round(m.get('total_length_mm', 0), 1)
-            area = round(m.get('area_mm2', 0), 1) if 'area_mm2' in m else '-'
+            width_crack = round(m.get('avg_width_mm', 0), 2)  # 폭
+            width_defect = '-'  # 너비 (사용 안 함)
+            area = '-'
         else:
-            width = round(m.get('width_mm', 0), 2)
+            # 8종 결함: 길이 + 너비 + 면적
             length = round(m.get('length_mm', 0), 1)
+            width_crack = '-'  # 폭 (사용 안 함)
+            width_defect = round(m.get('width_mm', 0), 1)  # 너비
             area = round(m.get('area_mm2', 0), 1)
 
         rows.append({
             'No.': cluster_id + 1,
             'Type': type_name,
-            'Width (mm)': width,
             'Length (mm)': length,
+            'Width-Crack (mm)': width_crack,  # 폭
+            'Width-Defect (mm)': width_defect,  # 너비
             'Area (mm²)': area
         })
 
     # Write CSV
+    fieldnames = ['No.', 'Type', 'Length (mm)', 'Width-Crack (mm)', 'Width-Defect (mm)', 'Area (mm²)']
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.DictWriter(f, fieldnames=['No.', 'Type', 'Width (mm)', 'Length (mm)', 'Area (mm²)'])
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
     logger.info(f"Saved measurement table: {output_path}")
 
     # Also print to console
-    print("\n" + "="*70)
+    print("\n" + "="*90)
     print("Measurement Table")
-    print("="*70)
-    print(f"{'No.':<6} {'Type':<16} {'Width(mm)':<12} {'Length(mm)':<14} {'Area(mm²)':<12}")
-    print("-"*70)
+    print("="*90)
+    print(f"{'No.':<6} {'Type':<14} {'길이(mm)':<12} {'폭(mm)':<10} {'너비(mm)':<10} {'면적(mm²)':<12}")
+    print("-"*90)
     for row in rows:
-        print(f"{row['No.']:<6} {row['Type']:<16} {row['Width (mm)']:<12} {row['Length (mm)']:<14} {row['Area (mm²)']:<12}")
-    print("="*70 + "\n")
+        print(f"{row['No.']:<6} {row['Type']:<14} {row['Length (mm)']:<12} "
+              f"{row['Width-Crack (mm)']:<10} {row['Width-Defect (mm)']:<10} {row['Area (mm²)']:<12}")
+    print("="*90 + "\n")
 
 
 def generate_combined_report(
@@ -685,8 +694,8 @@ def generate_combined_report(
     ax_table = fig.add_axes([0.58, 0.1, 0.38, 0.8])
     ax_table.axis('off')
 
-    # Prepare table data
-    table_data = [['No.', 'Type', 'Width\n(mm)', 'Length\n(mm)', 'Area\n(mm²)']]
+    # Prepare table data with 6 columns
+    table_data = [['No.', 'Type', '길이\n(mm)', '폭\n(mm)', '너비\n(mm)', '면적\n(mm²)']]
     for cluster_id in sorted(measurements.keys()):
         m = measurements[cluster_id]
         defect_class = m.get('class', 'crack')
@@ -694,19 +703,24 @@ def generate_combined_report(
 
         # Get measurements based on defect type
         if defect_class == 'crack':
-            width = f"{m.get('avg_width_mm', 0):.2f}"
+            # Crack: 길이 + 폭
             length = f"{m.get('total_length_mm', 0):.1f}"
-            area = f"{m.get('area_mm2', 0):.1f}" if 'area_mm2' in m else '-'
+            width_crack = f"{m.get('avg_width_mm', 0):.2f}"  # 폭
+            width_defect = '-'  # 너비
+            area = '-'
         else:
-            width = f"{m.get('width_mm', 0):.2f}"
+            # 8종 결함: 길이 + 너비 + 면적
             length = f"{m.get('length_mm', 0):.1f}"
+            width_crack = '-'  # 폭
+            width_defect = f"{m.get('width_mm', 0):.1f}"  # 너비
             area = f"{m.get('area_mm2', 0):.1f}"
 
         table_data.append([
             f'{cluster_id + 1}',
             type_name,
-            width,
             length,
+            width_crack,
+            width_defect,
             area
         ])
 
@@ -715,22 +729,22 @@ def generate_combined_report(
         cellText=table_data,
         loc='center',
         cellLoc='center',
-        colWidths=[0.12, 0.22, 0.18, 0.18, 0.18]
+        colWidths=[0.10, 0.20, 0.15, 0.13, 0.13, 0.15]
     )
 
     # Style table
     table.auto_set_font_size(False)
-    table.set_fontsize(9)
+    table.set_fontsize(8)
     table.scale(1.2, 1.5)
 
     # Header styling
-    for j in range(5):
+    for j in range(6):
         table[(0, j)].set_facecolor('#4472C4')
         table[(0, j)].set_text_props(color='white', fontweight='bold')
 
     # Alternating row colors
     for i in range(1, len(table_data)):
-        for j in range(4):
+        for j in range(6):
             if i % 2 == 0:
                 table[(i, j)].set_facecolor('#E8E8E8')
 
