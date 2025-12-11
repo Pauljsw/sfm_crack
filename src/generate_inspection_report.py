@@ -528,7 +528,10 @@ def generate_inspection_diagram(
             cluster_id, polyline, color = item
         else:
             cluster_id, polyline = item
-            color = plt.cm.Set1(cluster_id / max(1, len(crack_polylines)))
+            color = 'black'  # Default color
+
+        # Force all clusters to black
+        color = 'black'
 
         if polyline is not None and len(polyline) >= 2:
             # Draw polyline (smooth crack line)
@@ -675,7 +678,10 @@ def generate_combined_report(
             cluster_id, polyline, color = item
         else:
             cluster_id, polyline = item
-            color = 'red'
+            color = 'black'
+
+        # Force all clusters to black
+        color = 'black'
 
         if polyline is not None and len(polyline) >= 2:
             ax_diagram.plot(polyline[:, 0], polyline[:, 1],
