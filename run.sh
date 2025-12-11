@@ -80,6 +80,7 @@ phase3() {
 phase4() {
     run_phase 4 "Phase 3: Point Cloud Overlay" \
         "python -m src.point_cloud_overlay \
+            --config configs/simple.yaml \
             --sparse-dir data/sfm/sparse/0 \
             --masks-dir data/yolo_masks \
             --output outputs/sfm_masked_cloud.ply \

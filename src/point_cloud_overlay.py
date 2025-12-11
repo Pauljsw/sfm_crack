@@ -929,11 +929,13 @@ end_header
 
 if __name__ == '__main__':
     import argparse
-    from .utils import setup_logging
+    from .utils import setup_logging, load_config
 
     parser = argparse.ArgumentParser(
         description='Overlay YOLO masks on SFM point cloud with voting mechanism'
     )
+    parser.add_argument('--config', default=None,
+                       help='Configuration YAML file (optional, for multi-class colors)')
     parser.add_argument('--sparse-dir', required=True,
                        help='COLMAP sparse directory (e.g., data/sfm/sparse/0)')
     parser.add_argument('--masks-dir', required=True,
@@ -957,6 +959,18 @@ if __name__ == '__main__':
 
     setup_logging(args.log_level)
 
+    # Load class colors from config if provided
+    class_colors = None
+    if args.config:
+        config = load_config(args.config)
+        configured_colors = config.get('colors', {})
+        if configured_colors:
+            # Convert list colors to tuples
+            class_colors = {
+                name: tuple(color) for name, color in configured_colors.items()
+            }
+            logger.info(f"Loaded {len(class_colors)} class colors from config")
+
     try:
         result = overlay_masks_on_pointcloud(
             args.sparse_dir,
@@ -964,6 +978,7 @@ if __name__ == '__main__':
             args.output,
             args.output_json,
             tuple(args.crack_color),
+            class_colors,
             args.min_track_length,
             args.vote_threshold,
             args.min_confidence
