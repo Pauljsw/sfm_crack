@@ -269,29 +269,48 @@ def run_upsampling(
     # Load input
     logger.info(f"Loading: {input_json}")
     data = load_crack_points(input_json)
-    points = data['points']
-    n_original = len(points)
+    all_points = data['points']
+
+    # Filter to only crack class for upsampling
+    crack_points = [p for p in all_points if p.get('class') == 'crack']
+    other_points = [p for p in all_points if p.get('class') != 'crack']
+
+    n_crack = len(crack_points)
+    n_other = len(other_points)
+    n_original = len(all_points)
 
     logger.info(f"Original points: {n_original}")
+    logger.info(f"  Crack points (to upsample): {n_crack}")
+    logger.info(f"  Other defect points (no upsampling): {n_other}")
 
-    # Upsample
-    if method == 'fixed':
-        logger.info(f"Method: Fixed interpolation (k={k_neighbors}, n={n_interpolations})")
-        upsampled = upsample_knn_interpolation(
-            points, k_neighbors, n_interpolations, max_distance
-        )
+    # Upsample crack points only
+    if n_crack > 0:
+        if method == 'fixed':
+            logger.info(f"Method: Fixed interpolation (k={k_neighbors}, n={n_interpolations})")
+            upsampled_crack = upsample_knn_interpolation(
+                crack_points, k_neighbors, n_interpolations, max_distance
+            )
+        else:
+            logger.info(f"Method: Density-controlled (k={k_neighbors}, min_spacing={min_spacing*1000:.1f}mm)")
+            upsampled_crack = upsample_with_density_control(
+                crack_points, None, min_spacing, k_neighbors, max_distance
+            )
+
+        n_synthetic = len(upsampled_crack) - n_crack
+        logger.info(f"Synthetic crack points added: {n_synthetic}")
+        logger.info(f"Crack density increase: {len(upsampled_crack)/n_crack:.2f}x")
     else:
-        logger.info(f"Method: Density-controlled (k={k_neighbors}, min_spacing={min_spacing*1000:.1f}mm)")
-        upsampled = upsample_with_density_control(
-            points, None, min_spacing, k_neighbors, max_distance
-        )
+        upsampled_crack = []
+        n_synthetic = 0
+        logger.info("No crack points to upsample")
 
-    n_synthetic = len(upsampled) - n_original
+    # Combine upsampled crack points with original other defect points
+    upsampled = upsampled_crack + other_points
     n_total = len(upsampled)
 
-    logger.info(f"Synthetic points added: {n_synthetic}")
-    logger.info(f"Total points: {n_total}")
-    logger.info(f"Density increase: {n_total/n_original:.2f}x")
+    logger.info(f"Total points after upsampling: {n_total}")
+    logger.info(f"  Crack points (original + synthetic): {len(upsampled_crack)}")
+    logger.info(f"  Other defect points (original only): {n_other}")
 
     # Prepare output
     output_data = {

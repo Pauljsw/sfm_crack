@@ -479,28 +479,31 @@ def is_pixel_in_crack_mask(
     mask_json: Dict,
     pixel_xy: Tuple[float, float],
     image_stem: str = None,
-    min_confidence: float = 0.0
-) -> Tuple[bool, float, int]:
+    min_confidence: float = 0.0,
+    filter_class: str = None
+) -> Tuple[bool, float, int, str]:
     """
-    Check if pixel is inside any crack polygon with confidence validation.
+    Check if pixel is inside any polygon with confidence validation.
 
     Args:
         mask_json: YOLO mask JSON data
         pixel_xy: Pixel coordinates (u, v)
         image_stem: Image identifier for logging (optional)
         min_confidence: Minimum YOLO confidence to consider (default: 0.0)
+        filter_class: If specified, only check this class (e.g., 'crack'). If None, check all classes.
 
     Returns:
-        (is_inside, confidence, mask_id): True if pixel is in valid crack mask,
-                                          confidence score, and mask index (-1 if not found)
+        (is_inside, confidence, mask_id, class_name): True if pixel is in valid mask,
+                                          confidence score, mask index (-1 if not found), and class name
     """
     if 'masks' not in mask_json:
-        return False, 0.0, -1
+        return False, 0.0, -1, ''
 
     point = ShapelyPoint(pixel_xy)
 
     for mask_idx, mask in enumerate(mask_json['masks']):
-        if mask['class'] != 'crack':
+        # Filter by class if specified
+        if filter_class and mask['class'] != filter_class:
             continue
 
         confidence = mask.get('score', 0.0)
@@ -567,7 +570,8 @@ def is_pixel_in_crack_mask(
                 continue
 
             if poly.contains(point):
-                return True, confidence, mask_idx
+                class_name = mask.get('class', 'unknown')
+                return True, confidence, mask_idx, class_name
 
         except Exception as e:
             if image_stem:
@@ -576,7 +580,7 @@ def is_pixel_in_crack_mask(
                 )
             continue
 
-    return False, 0.0, -1
+    return False, 0.0, -1, ''
 
 
 def overlay_masks_on_pointcloud(
@@ -585,9 +589,11 @@ def overlay_masks_on_pointcloud(
     output_ply: str,
     output_json: str = None,
     crack_color: Tuple[int, int, int] = (255, 0, 0),
+    class_colors: Dict[str, Tuple[int, int, int]] = None,
     min_track_length: int = 2,
     vote_threshold: float = 0.5,
-    min_confidence: float = 0.25
+    min_confidence: float = 0.25,
+    filter_class: str = None
 ):
     """
     Overlay YOLO masks on SFM point cloud with improved voting mechanism.
@@ -596,15 +602,26 @@ def overlay_masks_on_pointcloud(
         sparse_dir: COLMAP sparse/0 directory
         masks_dir: YOLO masks directory
         output_ply: Output PLY path
-        output_json: Output JSON path for crack points with mapping info (optional)
-        crack_color: RGB color for crack points (default: red)
+        output_json: Output JSON path for defect points with mapping info (optional)
+        crack_color: RGB color for crack points (default: red, kept for backward compatibility)
+        class_colors: Dict of class_name -> RGB color. If None, uses crack_color for all.
         min_track_length: Minimum track length to include point
         vote_threshold: Minimum ratio of views that must agree (default: 0.5 = majority)
         min_confidence: Minimum YOLO confidence to consider (default: 0.25)
+        filter_class: If specified, only process this class (e.g., 'crack'). If None, process all classes.
     """
     logger.info("=" * 80)
     logger.info("Point Cloud Mask Overlay")
     logger.info("=" * 80)
+
+    # Setup class colors
+    if class_colors is None:
+        # Default: use crack_color for all classes
+        class_colors = {}
+
+    # Ensure crack color is set (backward compatibility)
+    if 'crack' not in class_colors:
+        class_colors['crack'] = crack_color
 
     sparse_path = Path(sparse_dir)
     masks_path = Path(masks_dir)
@@ -664,9 +681,9 @@ def overlay_masks_on_pointcloud(
             continue
 
         # Voting mechanism: count votes across all views
-        crack_votes = 0
+        class_votes = {}  # class_name -> vote_count
+        class_confidences = {}  # class_name -> list of confidences
         total_votes = 0
-        confidence_sum = 0.0
         source_masks = []  # Mapping info
 
         for img_id, point2D_idx in zip(point.image_ids, point.point2D_idxs):
@@ -690,61 +707,84 @@ def overlay_masks_on_pointcloud(
             total_votes += 1
 
             # Check mask with confidence filtering
-            is_in_mask, mask_confidence, mask_id = is_pixel_in_crack_mask(
+            is_in_mask, mask_confidence, mask_id, detected_class = is_pixel_in_crack_mask(
                 masks[image_stem],
                 pixel_xy,
                 image_stem,
-                min_confidence
+                min_confidence,
+                filter_class
             )
 
-            if is_in_mask:
-                crack_votes += 1
-                confidence_sum += mask_confidence
+            if is_in_mask and detected_class:
+                # Track votes per class
+                if detected_class not in class_votes:
+                    class_votes[detected_class] = 0
+                    class_confidences[detected_class] = []
+
+                class_votes[detected_class] += 1
+                class_confidences[detected_class].append(mask_confidence)
+
                 source_masks.append({
                     'image_id': image_stem,
                     'mask_id': mask_id,
+                    'class': detected_class,
                     'confidence': mask_confidence,
                     'uv': [float(pixel_xy[0]), float(pixel_xy[1])]  # 2D pixel coordinates
                 })
 
-        # Decision based on voting
-        if total_votes > 0:
-            vote_ratio = crack_votes / total_votes
-            avg_confidence = confidence_sum / crack_votes if crack_votes > 0 else 0.0
+        # Decision based on voting: select class with most votes
+        if total_votes > 0 and class_votes:
+            # Find the class with most votes
+            best_class = max(class_votes.items(), key=lambda x: x[1])[0]
+            best_class_votes = class_votes[best_class]
+            best_class_confidences = class_confidences[best_class]
 
-            is_crack = (vote_ratio >= vote_threshold and avg_confidence >= min_confidence)
+            vote_ratio = best_class_votes / total_votes
+            avg_confidence = sum(best_class_confidences) / len(best_class_confidences)
+
+            is_defect = (vote_ratio >= vote_threshold and avg_confidence >= min_confidence)
 
             # Collect statistics
             view_counts.append(total_votes)
-            if is_crack:
-                vote_counts.append(crack_votes)
+            if is_defect:
+                vote_counts.append(best_class_votes)
                 confidence_scores.append(avg_confidence)
 
-                # Store crack point with mapping info
+                # Store defect point with mapping info
                 crack_points_data.append({
                     'point_id': int(point_id),
                     'xyz': xyz.tolist(),
+                    'class': best_class,  # Add class information
                     'source_masks': source_masks,
                     'vote_ratio': vote_ratio,
                     'avg_confidence': avg_confidence,
                     'n_views': len(source_masks)
                 })
-        else:
-            is_crack = False
 
-        # Assign color
-        if is_crack:
-            rgb = crack_color
-            crack_count += 1
-        else:
-            rgb = original_rgb
+                # Assign class-specific color
+                rgb = class_colors.get(best_class, crack_color)  # Fallback to crack_color
+                crack_count += 1
 
-        xyz_list.append(xyz)
-        rgb_list.append(rgb)
+                xyz_list.append(xyz)
+                rgb_list.append(rgb)
+        else:
+            # Not a defect - use original color
+            xyz_list.append(xyz)
+            rgb_list.append(original_rgb)
 
     logger.info(f"  Total points: {len(xyz_list)}")
-    logger.info(f"  Crack points: {crack_count} ({crack_count/len(xyz_list)*100:.1f}%)")
+    logger.info(f"  Defect points: {crack_count} ({crack_count/len(xyz_list)*100:.1f}%)")
     logger.info(f"  Skipped (short track): {skipped_count}")
+
+    # Log class distribution
+    if crack_points_data:
+        class_counts = {}
+        for pt in crack_points_data:
+            cls = pt.get('class', 'unknown')
+            class_counts[cls] = class_counts.get(cls, 0) + 1
+        logger.info(f"  Class distribution:")
+        for cls, count in sorted(class_counts.items()):
+            logger.info(f"    {cls}: {count}")
 
     # Compute quality metrics
     metrics = {
@@ -810,18 +850,18 @@ def overlay_masks_on_pointcloud(
 
     # Save JSON with mapping info (optional)
     if output_json:
-        logger.info(f"Saving crack points with mapping info to: {output_json}")
+        logger.info(f"Saving defect points with mapping info to: {output_json}")
 
         json_output = {
             'metadata': {
                 'total_points': len(xyz_list),
-                'crack_points': crack_count,
+                'defect_points': crack_count,  # Renamed from crack_points
                 'skipped_points': skipped_count,
                 'vote_threshold': vote_threshold,
                 'min_confidence': min_confidence,
                 'min_track_length': min_track_length,
                 'avg_confidence': metrics.get('avg_confidence', 0.0),
-                'avg_views_per_crack': metrics.get('avg_votes_per_crack', 0.0)
+                'avg_views_per_defect': metrics.get('avg_votes_per_crack', 0.0)
             },
             'points': crack_points_data
         }
@@ -832,7 +872,7 @@ def overlay_masks_on_pointcloud(
         with open(output_json, 'w') as f:
             json.dump(json_output, f, indent=2)
 
-        logger.info(f"  Saved {len(crack_points_data)} crack points with mapping info")
+        logger.info(f"  Saved {len(crack_points_data)} defect points with mapping info")
 
     logger.info("=" * 80)
     logger.info("Point cloud overlay complete!")
