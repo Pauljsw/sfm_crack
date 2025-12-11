@@ -1841,15 +1841,31 @@ def run_measurement(
 
         measurements.append(measurement)
 
-        logger.info(
-            f"Cluster {measurement['cluster_id']} ({color_name}): "
-            f"L={measurement['total_length_mm']:.1f}mm, "
-            f"W_avg={measurement['avg_width_mm']:.2f}mm, "
-            f"W_max={measurement['max_width_mm']:.2f}mm"
-        )
+        # Log measurement based on defect class
+        defect_class = measurement.get('class', 'crack')
+        if defect_class == 'crack':
+            logger.info(
+                f"Cluster {measurement['cluster_id']} ({color_name}): "
+                f"L={measurement['total_length_mm']:.1f}mm, "
+                f"W_avg={measurement['avg_width_mm']:.2f}mm, "
+                f"W_max={measurement['max_width_mm']:.2f}mm"
+            )
+        else:
+            logger.info(
+                f"Cluster {measurement['cluster_id']} ({defect_class}): "
+                f"L={measurement['length_mm']:.1f}mm, "
+                f"W={measurement['width_mm']:.1f}mm, "
+                f"A={measurement['area_mm2']:.1f}mm²"
+            )
 
-    # Sort by total length (largest first)
-    measurements.sort(key=lambda x: x['total_length_mm'], reverse=True)
+    # Sort by length (largest first), handling both crack and non-crack measurements
+    def get_length(m):
+        if m.get('class', 'crack') == 'crack':
+            return m.get('total_length_mm', 0)
+        else:
+            return m.get('length_mm', 0)
+
+    measurements.sort(key=get_length, reverse=True)
 
     # Output
     output_data = {
