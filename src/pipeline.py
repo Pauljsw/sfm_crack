@@ -280,11 +280,20 @@ class Pipeline:
         logger.info("=" * 80)
 
         self._load_poses()
-        if not self.pose_index:
-            logger.error("No SFM poses available. Run the SFM stage before YOLO inference.")
-            return
 
-        image_ids = sorted(self.pose_index.keys())
+        # TEMPORARY: Allow YOLO to run without poses by reading RGB directory
+        if not self.pose_index:
+            logger.warning("No SFM poses available. Running YOLO on all RGB images.")
+            rgb_dir = Path(self.config['paths']['rgb_dir'])
+            image_files = []
+            for ext in ['.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff']:
+                image_files.extend(rgb_dir.glob(f'*{ext}'))
+            image_ids = sorted([img.stem for img in image_files])
+            if not image_ids:
+                logger.error("No images found in RGB directory: %s", rgb_dir)
+                return
+        else:
+            image_ids = sorted(self.pose_index.keys())
         effective_mode = reinfer_mode
         if effective_mode == 'off':
             effective_mode = self.config.get('reinfer', {}).get('mode', 'auto')
